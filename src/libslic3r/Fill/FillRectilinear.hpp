@@ -33,6 +33,16 @@ protected:
     BoundingBox extended_object_bounding_box() const;
 };
 
+// Ironing-only raster with global column ordering, including around holes.
+class FillGlobalRectilinearIroning : public Fill
+{
+public:
+    Fill* clone() const override { return new FillGlobalRectilinearIroning(*this); }
+    bool is_self_crossing() override { return false; }
+    bool no_sort() const override { return true; }
+    Polylines fill_surface(const Surface *surface, const FillParams &params) override;
+};
+
 class FillAlignedRectilinear : public FillRectilinear
 {
 public:
