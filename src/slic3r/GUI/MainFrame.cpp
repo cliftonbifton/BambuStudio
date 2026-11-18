@@ -13,6 +13,9 @@
 //#include <wx/glcanvas.h>
 #include <wx/filename.h>
 #include <wx/debug.h>
+#include <wx/utils.h>
+#include <boost/filesystem.hpp>
+#include <stdexcept>
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/property_tree/ptree.hpp>
@@ -106,6 +109,79 @@ wxDEFINE_EVENT(EVT_UPDATE_PRESET_CB, SimpleEvent);
 wxDEFINE_EVENT(EVT_BACKUP_POST, wxCommandEvent);
 wxDEFINE_EVENT(EVT_LOAD_URL, wxCommandEvent);
 wxDEFINE_EVENT(EVT_LOAD_PRINTER_URL, wxCommandEvent);
+
+// Encode UTF-8 bytes as a URI component, not the complete URI. In particular,
+// Windows path separators, ampersands, and non-ASCII file names must be escaped.
+static std::string bambu_connect_encode_component(const std::string &value)
+{
+    static constexpr char hex[] = "0123456789ABCDEF";
+    std::string encoded;
+    for (unsigned char c : value) {
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
+            encoded += char(c);
+        } else {
+            encoded += '%';
+            encoded += hex[c >> 4];
+            encoded += hex[c & 15];
+        }
+    }
+    return encoded;
+}
+
+// Use the same sliced 3MF export as "Export plate sliced file", then hand
+// the resulting archive to the official Bambu Connect URI handler.
+// Do not attempt to start the printer directly or bypass authentication.
+static void open_current_plate_in_bambu_connect(Plater *plater)
+{
+    namespace fs = boost::filesystem;
+    if (!plater || plater->model().objects.empty() ||
+        plater->is_background_process_slicing() ||
+        plater->is_background_process_update_scheduled())
+        return;
+    auto &plates = plater->get_partplate_list();
+    auto *plate = plates.get_curr_plate();
+    if (!plate || !plate->is_slice_result_ready_for_export())
+        return;
+
+    fs::path output;
+    try {
+        // Keep each transfer in its own temporary directory. Connect may
+        // import asynchronously, so do not delete the file on launch/exit.
+        const fs::path dir = fs::temp_directory_path() /
+            fs::unique_path("BambuStudio-Connect-%%%%%%%%%%%%%%%%");
+        if (!fs::create_directory(dir))
+            throw std::runtime_error("Could not create a temporary print directory");
+        output = dir / "plate.gcode.3mf";
+        const int result = plater->export_3mf(output,
+            SaveStrategy::Silence | SaveStrategy::SplitModel |
+            SaveStrategy::WithGcode | SaveStrategy::SkipModel,
+            plates.get_curr_plate_index());
+        if (result < 0 || !fs::is_regular_file(output) || fs::file_size(output) == 0) {
+            MessageDialog(plater, _L("Could not export the sliced plate for Bambu Connect."),
+                _L("Bambu Connect"), wxOK | wxICON_WARNING).ShowModal();
+            return;
+        }
+
+        wxString name = plater->get_export_gcode_filename("", true, false);
+        if (name.empty())
+            name = "Plate";
+        wxString path = from_path(fs::absolute(output));
+        path.Replace("\\", "/");
+        const std::string uri = "bambu-connect://import-file?path=" +
+            bambu_connect_encode_component(into_u8(path)) + "&name=" +
+            bambu_connect_encode_component(into_u8(name)) + "&version=1.0.0";
+        if (!wxLaunchDefaultBrowser(from_u8(uri))) {
+            MessageDialog(plater,
+                _L("Could not launch Bambu Connect. Install it or import this sliced file manually:") +
+                    "\n" + from_path(output),
+                _L("Bambu Connect"), wxOK | wxICON_WARNING).ShowModal();
+        }
+    } catch (const std::exception &) {
+        MessageDialog(plater, _L("Could not prepare the print for Bambu Connect. Try exporting the sliced plate manually."),
+            _L("Bambu Connect"), wxOK | wxICON_WARNING).ShowModal();
+    }
+}
 
 static bool is_text_entry_focused()
 {
@@ -2284,6 +2360,13 @@ wxBoxSizer* MainFrame::create_side_tools()
                 wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SEND_GCODE));
             else if (m_print_select == eUploadGcode)
                 wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_UPLOAD_GCODE));
+            else if (m_print_select == ePrintViaBambuConnect) {
+                m_plater->apply_background_progress();
+                m_print_enable = get_enable_print_status();
+                m_print_btn->Enable(m_print_enable);
+                if (m_print_enable)
+                    open_current_plate_in_bambu_connect(m_plater);
+            }
             else if (m_print_select == eExportSlicedFile)
                 wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_EXPORT_SLICED_FILE));
             else if (m_print_select == eExportAllSlicedFile)
@@ -2465,6 +2548,18 @@ wxBoxSizer* MainFrame::create_side_tools()
                 p->append_button(export_sliced_file_btn);
                 p->append_button(export_all_sliced_file_btn);
 
+                SideButton *connect_btn = new SideButton(p, _L("Print via Bambu Connect"), "");
+                connect_btn->SetCornerRadius(0);
+                connect_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent &) {
+                    m_print_btn->SetLabel(_L("Print via Bambu Connect"));
+                    m_print_select = ePrintViaBambuConnect;
+                    m_print_enable = get_enable_print_status();
+                    m_print_btn->Enable(m_print_enable);
+                    this->Layout();
+                    p->Dismiss();
+                });
+                p->append_button(connect_btn);
+
 
                 if (check_bbl_farm_client_installed()) {
                     SideButton *send_to_multi_app_btn = new SideButton(p, _L("Send to Bambu Farm Manager Client"), "");
@@ -2618,6 +2713,13 @@ bool MainFrame::get_enable_print_status()
         if (!can_send_gcode())
             enable = false;
         enable = enable && !is_all_plates;
+    }
+    else if (m_print_select == ePrintViaBambuConnect)
+    {
+        enable = current_plate && current_plate->is_slice_result_ready_for_export() &&
+            !is_all_plates && !m_plater->only_gcode_mode() &&
+            !m_plater->model().objects.empty() && !m_plater->is_background_process_slicing() &&
+            !m_plater->is_background_process_update_scheduled();
     }
     else if (m_print_select == eExportSlicedFile)
     {

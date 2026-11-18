@@ -67,6 +67,7 @@ Fill* Fill::new_from_type(const InfillPattern type)
     // Same filler as ipArchimedeanChords; the ironing specific lead-in and center-out ordering are
     // selected by FillParams::extrusion_role inside FillPlanePath::_fill_surface_single().
     case ipIroningArchimedeanSpiral: return new FillArchimedeanChords();
+    case ipIroningGlobalRectilinear: return new FillGlobalRectilinearIroning();
     default: throw Slic3r::InvalidArgument("unknown type");
     }
 }

@@ -18,6 +18,7 @@
 #include "../VariableWidth.hpp"
 
 #include "FillRectilinear.hpp"
+#include "GlobalIroningOrder.hpp"
 #include "FillConformal.hpp"
 
 // #define SLIC3R_DEBUG
@@ -3092,6 +3093,65 @@ Polylines FillRectilinear::fill_surface(const Surface *surface, const FillParams
             BOOST_LOG_TRIVIAL(error) << "fill_surface_by_multilines() failed to fill a region.";
     }
     return polylines_out;
+}
+
+Polylines FillGlobalRectilinearIroning::fill_surface(const Surface *surface, const FillParams &)
+{
+    // Layer::make_ironing has already inset the printable top surfaces and
+    // removed voids. Use the same small additional inward offset as the
+    // rectilinear filler, and keep the requested ironing spacing unchanged.
+    if (!(this->spacing > 0.) || !std::isfinite(this->spacing) || surface->expolygon.empty())
+        return {};
+    const coord_t step = coord_t(scale_(this->spacing));
+    if (step <= 0)
+        return {};
+    const float rotation = this->_infill_direction(surface).first;
+    ExPolygon rotated = surface->expolygon;
+    rotated.rotate(-rotation);
+    const ExPolygons clip = offset_ex(rotated, -float(scale_(0.05 * this->spacing)));
+    if (clip.empty())
+        return {};
+    const BoundingBox bounds = get_extents(clip);
+    const coord_t width = bounds.max.x() - bounds.min.x();
+    if (width <= 0 || bounds.max.y() <= bounds.min.y())
+        return {};
+    // Center the raster on the region, without adjusting the requested pitch.
+    const coord_t count = width / step + (width % step != 0);
+    const coord_t first_x = bounds.min.x() + (width - (count - 1) * step) / 2;
+    Polylines raster;
+    raster.reserve(size_t(count));
+    for (coord_t i = 0; i < count; ++i) {
+        const coord_t x = first_x + i * step;
+        raster.emplace_back(Point(x, bounds.min.y() - 1), Point(x, bounds.max.y() + 1));
+    }
+    Polylines spans = intersection_pl(raster, clip);
+
+    // Short links make a regular, uninterrupted serpentine where possible.
+    // A link is accepted only if the entire segment is inside the original
+    // ironing inset (slightly larger than the raster clip).
+    // All other transitions use normal slicer travel moves.
+    const auto can_link = [&](const Point &a, const Point &b) {
+        const double dx = double(a.x()) - double(b.x());
+        const double dy = double(a.y()) - double(b.y());
+        const double limit = double(this->link_max_length);
+        if (limit <= 0. || dx * dx + dy * dy > limit * limit)
+            return false;
+        const Polylines inside = intersection_pl(Polyline(a, b), rotated);
+        if (inside.size() != 1 || inside.front().points.size() < 2)
+            return false;
+        const auto &p = inside.front();
+        return (p.first_point() == a && p.last_point() == b) ||
+               (p.first_point() == b && p.last_point() == a);
+    };
+    Polylines out = detail::order_global_ironing(std::move(spans), first_x, step, can_link);
+    for (Polyline &p : out) {
+        p.rotate(rotation);
+        p.remove_duplicate_points();
+    }
+    out.erase(std::remove_if(out.begin(), out.end(), [](const Polyline &p) {
+        return p.points.size() < 2;
+    }), out.end());
+    return out;
 }
 
 Polylines FillMonotonic::fill_surface(const Surface *surface, const FillParams &params)

@@ -616,7 +616,8 @@ static t_config_enum_values s_keys_map_InfillPattern {
     { "lockedzag",          ipLockedZag },
     { "2dlattice",          ip2DLattice  },
     { "ironingarchimedeanspiral", ipIroningArchimedeanSpiral },
-    { "globalmonotonicline", ipGlobalMonotonicLine }
+    { "globalmonotonicline", ipGlobalMonotonicLine },
+    { "ironingglobalrectilinear", ipIroningGlobalRectilinear }
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(InfillPattern)
 
@@ -4836,9 +4837,11 @@ void PrintConfigDef::init_fff_params()
     def->enum_values.push_back("concentric");
     def->enum_values.push_back("zig-zag");
     def->enum_values.push_back("ironingarchimedeanspiral");
+    def->enum_values.push_back("ironingglobalrectilinear");
     def->enum_labels.push_back(L("Concentric"));
     def->enum_labels.push_back(L("Rectilinear"));
     def->enum_labels.push_back(L("Archimedean Chords"));
+    def->enum_labels.push_back(L("Global Rectilinear"));
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipRectilinear));
 
