@@ -1,0 +1,17 @@
+# Development-branch-only build. Caches created by workflow_dispatch on this
+# branch are not visible to pull_request merge refs, so compile the testable
+# Windows artifact from the actual branch rather than rebuilding dependencies.
+name: Global Ironing — Windows x64
+on:
+  push:
+    branches:
+      - feature/global-ironing
+  workflow_dispatch:
+
+jobs:
+  windows_x64:
+    uses: ./.github/workflows/build_check_cache.yml
+    with:
+      os: windows-latest
+      build-deps-only: false
+    secrets: inherit
